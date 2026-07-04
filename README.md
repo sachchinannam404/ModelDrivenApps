@@ -38,7 +38,9 @@ Pass JSON in the web resource `data` parameter to point the chart at your Datave
   "endColumn": "new_enddate",
   "progressColumn": "new_progress",
   "orderBy": "new_startdate asc",
-  "top": 100
+  "pageSize": 50,
+  "recordsPerPage": 50,
+  "maxRecords": null
 }
 ```
 
@@ -46,13 +48,15 @@ Optional keys:
 
 - `filter`: OData `$filter` expression, for example `statecode eq 0`.
 - `orderBy`: OData `$orderby` expression.
-- `top`: maximum number of tasks to show.
+- `pageSize`: Dataverse server page size used while loading records; defaults to `50`.
+- `recordsPerPage`: client-side Gantt page size; defaults to `50` visible tasks per page.
+- `maxRecords`: optional hard cap. Leave as `null` to page through all matching tasks in 50-record pages.
 - `entitySetName`: plural entity set name used only by the fallback REST path. Inside model-driven apps, `Xrm.WebApi` uses `entityName`.
 
 ## Behavior
 
-- Loads Dataverse rows through `Xrm.WebApi.retrieveMultipleRecords`.
-- Displays rows in a Gantt chart with Day, Week, and Month views.
+- Loads every matching Dataverse row by paging through `Xrm.WebApi.retrieveMultipleRecords` results until no `nextLink` remains.
+- Displays loaded rows in a Gantt chart with Day, Week, and Month views, paginated at 50 tasks per page by default and expanding the chart height to fit each page.
 - Lets users adjust dates by dragging Gantt bars or by using Start and End sliders for the selected task.
 - Saves changed dates back to Dataverse with `Xrm.WebApi.updateRecord`.
 - Includes a fallback direct Web API path for browser testing when `Xrm.WebApi` is unavailable.

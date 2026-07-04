@@ -11,7 +11,9 @@ const DEFAULT_CONFIG = {
   endColumn: "new_enddate",
   progressColumn: "new_progress",
   orderBy: "new_startdate asc",
-  top: 100
+  pageSize: 50,
+  recordsPerPage: 50,
+  maxRecords: null
 };
 
 const getClientUrl = () => window.Xrm?.Utility?.getGlobalContext?.().getClientUrl?.() ?? window.location.origin;
@@ -58,7 +60,9 @@ const buildQuery = (config) => {
     .join(",");
   const query = new URLSearchParams();
   query.set("$select", selectedColumns);
-  query.set("$top", String(config.top ?? DEFAULT_CONFIG.top));
+  if (config.maxRecords) {
+    query.set("$top", String(config.maxRecords));
+  }
 
   if (config.filter) {
     query.set("$filter", config.filter);
@@ -93,25 +97,44 @@ const mapRowsToTasks = (rows, config) => rows.map((row) => {
 }).filter((task) => task.id);
 
 const retrieveTasks = async (config) => {
+  const allRows = [];
+  let nextQuery = buildQuery(config);
+
   if (window.Xrm?.WebApi) {
-    const result = await window.Xrm.WebApi.retrieveMultipleRecords(config.entityName, buildQuery(config));
-    return mapRowsToTasks(result.entities, config);
+    do {
+      const result = await window.Xrm.WebApi.retrieveMultipleRecords(
+        config.entityName,
+        nextQuery,
+        config.pageSize ?? DEFAULT_CONFIG.pageSize
+      );
+      allRows.push(...result.entities);
+      nextQuery = result.nextLink ?? "";
+    } while (nextQuery && (!config.maxRecords || allRows.length < config.maxRecords));
+
+    return mapRowsToTasks(config.maxRecords ? allRows.slice(0, config.maxRecords) : allRows, config);
   }
 
-  const response = await fetch(`${getClientUrl()}/api/data/v9.2/${config.entitySetName ?? config.entityName}s${buildQuery(config)}`, {
-    headers: {
-      Accept: "application/json",
-      "OData-MaxVersion": "4.0",
-      "OData-Version": "4.0"
+  let nextUrl = `${getClientUrl()}/api/data/v9.2/${config.entitySetName ?? config.entityName}s${nextQuery}`;
+  do {
+    const response = await fetch(nextUrl, {
+      headers: {
+        Accept: "application/json",
+        "OData-MaxVersion": "4.0",
+        "OData-Version": "4.0",
+        Prefer: `odata.maxpagesize=${config.pageSize ?? DEFAULT_CONFIG.pageSize}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Dataverse query failed with HTTP ${response.status}.`);
     }
-  });
 
-  if (!response.ok) {
-    throw new Error(`Dataverse query failed with HTTP ${response.status}.`);
-  }
+    const payload = await response.json();
+    allRows.push(...payload.value);
+    nextUrl = payload["@odata.nextLink"] ?? "";
+  } while (nextUrl && (!config.maxRecords || allRows.length < config.maxRecords));
 
-  const payload = await response.json();
-  return mapRowsToTasks(payload.value, config);
+  return mapRowsToTasks(config.maxRecords ? allRows.slice(0, config.maxRecords) : allRows, config);
 };
 
 const updateTaskDates = async (config, task) => {
@@ -145,6 +168,7 @@ const GanttApp = () => {
   const [config] = useState(parseConfig);
   const [tasks, setTasks] = useState([]);
   const [selectedTaskId, setSelectedTaskId] = useState();
+  const [currentPage, setCurrentPage] = useState(1);
   const [viewMode, setViewMode] = useState(ViewMode.Day);
   const [status, setStatus] = useState("Loading tasks...");
   const [error, setError] = useState("");
@@ -155,6 +179,7 @@ const GanttApp = () => {
     try {
       const nextTasks = await retrieveTasks(config);
       setTasks(nextTasks);
+      setCurrentPage(1);
       setSelectedTaskId((current) => current && nextTasks.some((task) => task.id === current) ? current : nextTasks[0]?.id);
       setStatus(nextTasks.length ? `${nextTasks.length} tasks loaded` : "No tasks found for this view configuration");
     } catch (loadError) {
@@ -167,15 +192,30 @@ const GanttApp = () => {
     void loadTasks();
   }, []);
 
-  const selectedTask = tasks.find((task) => task.id === selectedTaskId);
+  const recordsPerPage = config.recordsPerPage ?? DEFAULT_CONFIG.recordsPerPage;
+  const totalPages = Math.max(1, Math.ceil(tasks.length / recordsPerPage));
+  const safeCurrentPage = Math.min(currentPage, totalPages);
+  const pageStartIndex = (safeCurrentPage - 1) * recordsPerPage;
+  const visibleTasks = useMemo(
+    () => tasks.slice(pageStartIndex, pageStartIndex + recordsPerPage),
+    [pageStartIndex, recordsPerPage, tasks]
+  );
+  const selectedTask = visibleTasks.find((task) => task.id === selectedTaskId) ?? visibleTasks[0];
   const chartStart = useMemo(
-    () => tasks.reduce((min, task) => task.start < min ? task.start : min, tasks[0]?.start ?? new Date()),
-    [tasks]
+    () => visibleTasks.reduce((min, task) => task.start < min ? task.start : min, visibleTasks[0]?.start ?? new Date()),
+    [visibleTasks]
   );
   const maxSliderDays = useMemo(
-    () => Math.max(30, ...tasks.map((task) => dayDiff(chartStart, task.end) + 30)),
-    [chartStart, tasks]
+    () => Math.max(30, ...visibleTasks.map((task) => dayDiff(chartStart, task.end) + 30)),
+    [chartStart, visibleTasks]
   );
+
+  const changePage = (nextPage) => {
+    const boundedPage = Math.min(Math.max(nextPage, 1), totalPages);
+    const firstTaskOnPage = tasks[(boundedPage - 1) * recordsPerPage];
+    setCurrentPage(boundedPage);
+    setSelectedTaskId(firstTaskOnPage?.id);
+  };
 
   const saveTask = async (task) => {
     setTasks((current) => current.map((item) => item.id === task.id ? task : item));
@@ -237,11 +277,14 @@ const GanttApp = () => {
         React.createElement(
           "select",
           { value: selectedTaskId, onChange: (event) => setSelectedTaskId(event.target.value) },
-          tasks.map((task) => React.createElement("option", { key: task.id, value: task.id }, task.name))
+          visibleTasks.map((task) => React.createElement("option", { key: task.id, value: task.id }, task.name))
         )
       ),
+      React.createElement("button", { type: "button", onClick: () => changePage(safeCurrentPage - 1), disabled: safeCurrentPage === 1 }, "Previous"),
+      React.createElement("span", null, `Page ${safeCurrentPage} of ${totalPages}`),
+      React.createElement("button", { type: "button", onClick: () => changePage(safeCurrentPage + 1), disabled: safeCurrentPage === totalPages }, "Next"),
       React.createElement("button", { type: "button", onClick: () => void loadTasks() }, "Refresh"),
-      React.createElement("span", null, status)
+      React.createElement("span", null, `${status} (${visibleTasks.length} shown)`)
     ),
     selectedTask && React.createElement(
       "div",
@@ -272,12 +315,13 @@ const GanttApp = () => {
       )
     ),
     React.createElement(Gantt, {
-      tasks,
+      tasks: visibleTasks,
       viewMode,
       onDateChange: saveTask,
       onSelect: (task) => setSelectedTaskId(task.id),
       listCellWidth: "160px",
-      columnWidth: viewMode === ViewMode.Month ? 160 : 60
+      columnWidth: viewMode === ViewMode.Month ? 160 : 60,
+      ganttHeight: Math.max(360, visibleTasks.length * 50 + 80)
     })
   );
 };
