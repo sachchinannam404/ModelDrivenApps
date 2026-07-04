@@ -1,0 +1,81 @@
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: auto;
+  color: #242424;
+  background: #fff;
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+
+.gantt-webresource {
+  box-sizing: border-box;
+  min-height: 440px;
+  padding: 12px;
+}
+
+.gantt-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.gantt-toolbar label,
+.gantt-slider-panel label {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.gantt-toolbar select,
+.gantt-toolbar button,
+.gantt-slider-panel button {
+  min-height: 30px;
+}
+
+.gantt-slider-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 10px;
+  margin-bottom: 12px;
+  border: 1px solid #d1d1d1;
+  border-radius: 4px;
+  background: #fafafa;
+}
+
+.gantt-slider-panel label {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.gantt-slider-panel input[type="range"] {
+  width: 100%;
+}
+
+.gantt-message {
+  padding: 16px;
+  border: 1px dashed #c8c8c8;
+  border-radius: 4px;
+  background: #fafafa;
+}
+
+.gantt-error {
+  color: #a80000;
+  border-color: #a80000;
+}
+
+@media (max-width: 700px) {
+  .gantt-slider-panel {
+    grid-template-columns: 1fr;
+  }
+}
