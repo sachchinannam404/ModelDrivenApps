@@ -1,0 +1,285 @@
+import React, { useEffect, useMemo, useState } from "https://esm.sh/react@18.2.0";
+import { createRoot } from "https://esm.sh/react-dom@18.2.0/client";
+import { Gantt, ViewMode } from "https://esm.sh/gantt-task-react@0.3.9";
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const DEFAULT_DURATION_DAYS = 1;
+const DEFAULT_CONFIG = {
+  entityName: "new_task",
+  nameColumn: "new_name",
+  startColumn: "new_startdate",
+  endColumn: "new_enddate",
+  progressColumn: "new_progress",
+  orderBy: "new_startdate asc",
+  top: 100
+};
+
+const getClientUrl = () => window.Xrm?.Utility?.getGlobalContext?.().getClientUrl?.() ?? window.location.origin;
+const addDays = (date, days) => new Date(date.getTime() + days * MS_PER_DAY);
+const dayDiff = (start, end) => Math.round((end.getTime() - start.getTime()) / MS_PER_DAY);
+const dateOnly = (date) => date.toISOString().slice(0, 10);
+
+const parseDate = (value) => {
+  if (!value) {
+    return undefined;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+};
+
+const clampProgress = (value) => {
+  const numberValue = Number(value ?? 0);
+  if (!Number.isFinite(numberValue)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, numberValue));
+};
+
+const parseConfig = () => {
+  const params = new URLSearchParams(window.location.search);
+  const rawData = params.get("data");
+
+  if (!rawData) {
+    return DEFAULT_CONFIG;
+  }
+
+  try {
+    return { ...DEFAULT_CONFIG, ...JSON.parse(decodeURIComponent(rawData)) };
+  } catch (error) {
+    throw new Error(`The Gantt web resource data parameter is not valid JSON: ${error.message}`);
+  }
+};
+
+const buildQuery = (config) => {
+  const selectedColumns = [config.nameColumn, config.startColumn, config.endColumn, config.progressColumn]
+    .filter(Boolean)
+    .join(",");
+  const query = new URLSearchParams();
+  query.set("$select", selectedColumns);
+  query.set("$top", String(config.top ?? DEFAULT_CONFIG.top));
+
+  if (config.filter) {
+    query.set("$filter", config.filter);
+  }
+
+  if (config.orderBy) {
+    query.set("$orderby", config.orderBy);
+  }
+
+  return `?${query.toString()}`;
+};
+
+const getRecordId = (row, entityName) => {
+  const idColumn = `${entityName}id`;
+  const rawId = row[idColumn] ?? row[`${idColumn}`.toLowerCase()] ?? row.activityid;
+  return String(rawId ?? "").replace(/[{}]/g, "");
+};
+
+const mapRowsToTasks = (rows, config) => rows.map((row) => {
+  const start = parseDate(row[config.startColumn]) ?? new Date();
+  const end = parseDate(row[config.endColumn]) ?? addDays(start, DEFAULT_DURATION_DAYS);
+
+  return {
+    id: getRecordId(row, config.entityName),
+    name: String(row[config.nameColumn] ?? "Untitled task"),
+    type: "task",
+    start,
+    end: end < start ? addDays(start, DEFAULT_DURATION_DAYS) : end,
+    progress: clampProgress(row[config.progressColumn]),
+    styles: { progressColor: "#4472c4", progressSelectedColor: "#2f5597" }
+  };
+}).filter((task) => task.id);
+
+const retrieveTasks = async (config) => {
+  if (window.Xrm?.WebApi) {
+    const result = await window.Xrm.WebApi.retrieveMultipleRecords(config.entityName, buildQuery(config));
+    return mapRowsToTasks(result.entities, config);
+  }
+
+  const response = await fetch(`${getClientUrl()}/api/data/v9.2/${config.entitySetName ?? config.entityName}s${buildQuery(config)}`, {
+    headers: {
+      Accept: "application/json",
+      "OData-MaxVersion": "4.0",
+      "OData-Version": "4.0"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Dataverse query failed with HTTP ${response.status}.`);
+  }
+
+  const payload = await response.json();
+  return mapRowsToTasks(payload.value, config);
+};
+
+const updateTaskDates = async (config, task) => {
+  const payload = {
+    [config.startColumn]: dateOnly(task.start),
+    [config.endColumn]: dateOnly(task.end)
+  };
+
+  if (window.Xrm?.WebApi) {
+    await window.Xrm.WebApi.updateRecord(config.entityName, task.id, payload);
+    return;
+  }
+
+  const response = await fetch(`${getClientUrl()}/api/data/v9.2/${config.entitySetName ?? config.entityName}s(${task.id})`, {
+    method: "PATCH",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "OData-MaxVersion": "4.0",
+      "OData-Version": "4.0"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Dataverse update failed with HTTP ${response.status}.`);
+  }
+};
+
+const GanttApp = () => {
+  const [config] = useState(parseConfig);
+  const [tasks, setTasks] = useState([]);
+  const [selectedTaskId, setSelectedTaskId] = useState();
+  const [viewMode, setViewMode] = useState(ViewMode.Day);
+  const [status, setStatus] = useState("Loading tasks...");
+  const [error, setError] = useState("");
+
+  const loadTasks = async () => {
+    setError("");
+    setStatus("Loading tasks...");
+    try {
+      const nextTasks = await retrieveTasks(config);
+      setTasks(nextTasks);
+      setSelectedTaskId((current) => current && nextTasks.some((task) => task.id === current) ? current : nextTasks[0]?.id);
+      setStatus(nextTasks.length ? `${nextTasks.length} tasks loaded` : "No tasks found for this view configuration");
+    } catch (loadError) {
+      setError(loadError.message);
+      setStatus("");
+    }
+  };
+
+  useEffect(() => {
+    void loadTasks();
+  }, []);
+
+  const selectedTask = tasks.find((task) => task.id === selectedTaskId);
+  const chartStart = useMemo(
+    () => tasks.reduce((min, task) => task.start < min ? task.start : min, tasks[0]?.start ?? new Date()),
+    [tasks]
+  );
+  const maxSliderDays = useMemo(
+    () => Math.max(30, ...tasks.map((task) => dayDiff(chartStart, task.end) + 30)),
+    [chartStart, tasks]
+  );
+
+  const saveTask = async (task) => {
+    setTasks((current) => current.map((item) => item.id === task.id ? task : item));
+    setError("");
+    setStatus(`Saving ${task.name}...`);
+
+    try {
+      await updateTaskDates(config, task);
+      setStatus(`Saved ${task.name}`);
+    } catch (saveError) {
+      setError(saveError.message);
+      setStatus("");
+      await loadTasks();
+    }
+  };
+
+  const moveSelectedDate = async (field, dayOffset) => {
+    if (!selectedTask) {
+      return;
+    }
+
+    const nextDate = addDays(chartStart, dayOffset);
+    const nextTask = field === "start"
+      ? { ...selectedTask, start: nextDate <= selectedTask.end ? nextDate : selectedTask.end }
+      : { ...selectedTask, end: nextDate >= selectedTask.start ? nextDate : selectedTask.start };
+    await saveTask(nextTask);
+  };
+
+  if (error) {
+    return React.createElement("section", { className: "gantt-message gantt-error" }, error);
+  }
+
+  if (!tasks.length) {
+    return React.createElement("section", { className: "gantt-message" }, status);
+  }
+
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement(
+      "div",
+      { className: "gantt-toolbar" },
+      React.createElement(
+        "label",
+        null,
+        "View",
+        React.createElement(
+          "select",
+          { value: viewMode, onChange: (event) => setViewMode(event.target.value) },
+          React.createElement("option", { value: ViewMode.Day }, "Day"),
+          React.createElement("option", { value: ViewMode.Week }, "Week"),
+          React.createElement("option", { value: ViewMode.Month }, "Month")
+        )
+      ),
+      React.createElement(
+        "label",
+        null,
+        "Task",
+        React.createElement(
+          "select",
+          { value: selectedTaskId, onChange: (event) => setSelectedTaskId(event.target.value) },
+          tasks.map((task) => React.createElement("option", { key: task.id, value: task.id }, task.name))
+        )
+      ),
+      React.createElement("button", { type: "button", onClick: () => void loadTasks() }, "Refresh"),
+      React.createElement("span", null, status)
+    ),
+    selectedTask && React.createElement(
+      "div",
+      { className: "gantt-slider-panel", "aria-label": "Selected task date sliders" },
+      React.createElement(
+        "label",
+        null,
+        `Start: ${dateOnly(selectedTask.start)}`,
+        React.createElement("input", {
+          type: "range",
+          min: "0",
+          max: maxSliderDays,
+          value: dayDiff(chartStart, selectedTask.start),
+          onChange: (event) => void moveSelectedDate("start", Number(event.target.value))
+        })
+      ),
+      React.createElement(
+        "label",
+        null,
+        `End: ${dateOnly(selectedTask.end)}`,
+        React.createElement("input", {
+          type: "range",
+          min: "0",
+          max: maxSliderDays,
+          value: dayDiff(chartStart, selectedTask.end),
+          onChange: (event) => void moveSelectedDate("end", Number(event.target.value))
+        })
+      )
+    ),
+    React.createElement(Gantt, {
+      tasks,
+      viewMode,
+      onDateChange: saveTask,
+      onSelect: (task) => setSelectedTaskId(task.id),
+      listCellWidth: "160px",
+      columnWidth: viewMode === ViewMode.Month ? 160 : 60
+    })
+  );
+};
+
+createRoot(document.getElementById("root")).render(React.createElement(GanttApp));
